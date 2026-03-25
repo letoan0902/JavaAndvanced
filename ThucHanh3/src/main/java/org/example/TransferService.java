@@ -8,25 +8,13 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
-
-/**
- * One-transaction safe transfer implementation.
- *
- * Requirements covered:
- * - Check sender exists and has enough balance (PreparedStatement)
- * - Debit + credit in one transaction
- * - Rollback on any error
- * - Call stored procedure sp_UpdateBalance twice (CallableStatement)
- * - Fetch final results (PreparedStatement) and print
- */
 public final class TransferService {
 
-    private static final String SQL_LOCK_AND_GET_SENDER = "SELECT AccountId, FullName, Balance FROM Accounts WHERE AccountId = ? FOR UPDATE";
-    private static final String SQL_LOCK_RECEIVER_EXISTS = "SELECT AccountId FROM Accounts WHERE AccountId = ? FOR UPDATE";
-    private static final String SQL_SELECT_TWO = "SELECT AccountId, FullName, Balance FROM Accounts WHERE AccountId IN (?, ?) ORDER BY AccountId";
-    private static final String CALL_UPDATE_BALANCE = "{call sp_UpdateBalance(?, ?)}";
-
     public List<Account> transfer(Connection conn, String fromId, String toId, BigDecimal amount) throws SQLException {
+        String sqlCheckSender = "SELECT Balance FROM Accounts WHERE AccountId = ? FOR UPDATE";
+        String sqlCheckReceiver = "SELECT AccountId FROM Accounts WHERE AccountId = ? FOR UPDATE";
+        String sqlCallUpdate = "{call sp_UpdateBalance(?, ?)}";
+
         if (isBlank(fromId) || isBlank(toId)) {
             throw new IllegalArgumentException("fromId/toId must not be blank");
         }
@@ -41,15 +29,14 @@ public final class TransferService {
         conn.setAutoCommit(false);
 
         try {
-            // 1) Check sender exists + lock row + check balance
             BigDecimal senderBalance;
-            try (PreparedStatement ps = conn.prepareStatement(SQL_LOCK_AND_GET_SENDER)) {
+            try (PreparedStatement ps = conn.prepareStatement(sqlCheckSender)) {
                 ps.setString(1, fromId);
                 try (ResultSet rs = ps.executeQuery()) {
                     if (!rs.next()) {
                         throw new IllegalStateException("Sender account not found: " + fromId);
                     }
-                    senderBalance = rs.getBigDecimal("Balance");
+                    senderBalance = rs.getBigDecimal(1);
                 }
             }
 
@@ -60,8 +47,7 @@ public final class TransferService {
                 throw new IllegalStateException("Insufficient balance. Current=" + senderBalance + ", required=" + amount);
             }
 
-            // 2) Check receiver exists + lock row
-            try (PreparedStatement ps = conn.prepareStatement(SQL_LOCK_RECEIVER_EXISTS)) {
+            try (PreparedStatement ps = conn.prepareStatement(sqlCheckReceiver)) {
                 ps.setString(1, toId);
                 try (ResultSet rs = ps.executeQuery()) {
                     if (!rs.next()) {
@@ -70,9 +56,7 @@ public final class TransferService {
                 }
             }
 
-            // 3) Business execution via CallableStatement (2 calls)
-            try (CallableStatement cs = conn.prepareCall(CALL_UPDATE_BALANCE)) {
-                // debit sender
+            try (CallableStatement cs = conn.prepareCall(sqlCallUpdate)) {
                 cs.setString(1, fromId);
                 cs.setBigDecimal(2, amount.negate());
                 int updated1 = cs.executeUpdate();
@@ -80,7 +64,6 @@ public final class TransferService {
                     throw new SQLException("Debit failed; no rows affected for: " + fromId);
                 }
 
-                // credit receiver
                 cs.setString(1, toId);
                 cs.setBigDecimal(2, amount);
                 int updated2 = cs.executeUpdate();
@@ -90,8 +73,6 @@ public final class TransferService {
             }
 
             conn.commit();
-
-            // 4) Fetch final states
             return fetchAccounts(conn, fromId, toId);
         } catch (SQLException e) {
             conn.rollback();
@@ -102,8 +83,9 @@ public final class TransferService {
     }
 
     public List<Account> fetchAccounts(Connection conn, String id1, String id2) throws SQLException {
+        String sqlSelect = "SELECT AccountId, FullName, Balance FROM Accounts WHERE AccountId IN (?, ?) ORDER BY AccountId";
         List<Account> accounts = new ArrayList<>();
-        try (PreparedStatement ps = conn.prepareStatement(SQL_SELECT_TWO)) {
+        try (PreparedStatement ps = conn.prepareStatement(sqlSelect)) {
             ps.setString(1, id1);
             ps.setString(2, id2);
             try (ResultSet rs = ps.executeQuery()) {

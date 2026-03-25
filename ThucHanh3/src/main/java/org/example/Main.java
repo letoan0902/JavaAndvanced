@@ -8,8 +8,6 @@ import java.util.List;
 
 public class Main {
     public static void main(String[] args) {
-        // Usage (optional):
-        //   gradlew.bat run --args="ACC01 ACC02 500"
         String fromId = args.length > 0 ? args[0] : "ACC01";
         String toId = args.length > 1 ? args[1] : "ACC02";
         BigDecimal amount = args.length > 2 ? new BigDecimal(args[2]) : new BigDecimal("500");
